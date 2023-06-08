@@ -1,7 +1,14 @@
-ï»¿#include <vector>
+#include <vector>
 #include <iostream>
 
 using namespace std;
+
+vector<double> w = {1, 1};
+vector<double> e = { -0.5773502692, 0.5773502692 };
+vector<double> n1 = { 0.5 * (1 - e[0]), 0.5 * (1 - e[1]) };
+vector<double> n2 = { 0.5 * (1 + e[0]), 0.5 * (1 + e[1]) };
+double dTau = 10;
+//int time = 2;
 
 vector<double> GaussElimination(const vector<vector<double>>& _A, const vector<double>& _B) {
     int n = _A.size();
@@ -40,25 +47,34 @@ vector<double> GaussElimination(const vector<vector<double>>& _A, const vector<d
 
 struct GlobalData
 {
-    double tot; //temperatura otoczenia
-    double alfa; //warunek brzegowy konwekcji
-    double q; //gestosc strumienia ciepla
-    double k; //wspolczynnik przewodzenia ciepla
-    double l; //dlugosc preta
-    double s; //pole przekroju preta
+    //0, 0.08, 300, 100, 1200, 1000, 700, 25, 7800, 9, 8
+    double rMin; //promieñ minimalny wsadu
+    double rMax; //promieñ maksymalny wsadu
+    double alfaAir; //wspó³czynnik konwekcyjnej wymiany ciep³a
+    double tempBegin; //temperatura pocz¹tkowa
+    double tempAir; //temperatura otoczenia
+    double tauMax; //czas procesu s
+    double c; //efektywne ciep³o w³aœciwe
+    double k; //wspó³czynnik przewodzenia ciep³a
+    double rho; //gêstoœæ metalu
     int nN; //liczba wezlow siatki MES
     int nE; //liczba elementow siatki MES
+    double dR;
 
-    GlobalData(double tot, double alfa, double q, double k, double l, double s, int nN, int nE) 
+    GlobalData(double rMin, double rMax, double alfaAir, double tempBegin, double tempAir, double tauMax, double c, double k, double rho, int nN, int nE)
     {
-        this->tot = tot;
-        this->alfa = alfa;
-        this->q = q;
+        this->rMin = rMin;
+        this->rMax = rMax;
+        this->alfaAir = alfaAir;
+        this->tempBegin = tempBegin;
+        this->tempAir = tempAir;
+        this->tauMax = tauMax;
+        this->c = c;
         this->k = k;
-        this->l = l;
-        this->s = s;
+        this->rho = rho;
         this->nN = nN;
         this->nE = nE;
+        this->dR = (rMax-rMin) / nE;
     }
 };
 
@@ -84,7 +100,7 @@ struct Element
     vector<vector<double>> h; //lokalne macierz
     vector<double> p; //lokalne wektor
 
-    Element(double k, int id[2], double le) 
+    Element(double k, int id[2], double le)
     {
         this->k = k;
         this->id[0] = id[0];
@@ -94,26 +110,45 @@ struct Element
         p = vector<double>(3);
     }
 
-    void calculate(GlobalData globalData, vector<Node> nodes) 
+    void calculate(GlobalData globalData, vector<Node> nodes)
     {
-        //wyliczenie macierzy H
-        if (nodes[id[0]].bc == 2) h[0][0] = (globalData.s * globalData.k * (1 / le)) + (globalData.alfa * globalData.s);
-        else h[0][0] = (globalData.s * globalData.k * (1 / le));
+        for (int i = 0; i < w.size(); ++i)
+        {
+            double intePos = (n1[i] * nodes[id[0]].x) + (n2[i] * nodes[id[1]].x);
+            double intelTemperature = (n1[i] * nodes[id[0]].t) + (n2[i] * nodes[id[1]].t);
+            double pom1 = (globalData.k * intePos * w[i] * (1 / globalData.dR));
+            double pom2 = (globalData.c * globalData.rho * globalData.dR * intePos * w[i]) / dTau;
 
-        h[0][1] = globalData.s * globalData.k * (-1 / le);
-        h[1][0] = globalData.s * globalData.k * (-1 / le);
-        
-        if (nodes[id[1]].bc == 2) h[1][1] = (globalData.s * globalData.k * (1 / le)) + globalData.alfa * globalData.s;
-        else h[1][1] = globalData.s * globalData.k * (1 / le);
+            //macierz H
+            h[0][0] += (pom1 + (pom2 * n1[i] * n1[i]));
+            h[0][1] += (-pom1 + (pom2 * n1[i] * n2[i]));
+            h[1][0] += (-pom1 + (pom2 * n1[i] * n2[i]));
+            h[1][1] += (pom1 + (pom2 * n2[i] * n2[i]));
 
-        //wyliczenie macierzy P
-        if (nodes[id[0]].bc == 1) p[0] = globalData.q * globalData.s;
+            //wektor P
+            p[0] += -((globalData.c * globalData.rho * globalData.dR * intelTemperature * intePos * w[i] * n1[i]) / dTau);
+            p[1] += -((globalData.c * globalData.rho * globalData.dR * intelTemperature * intePos * w[i] * n2[i]) / dTau);
 
-        if (nodes[id[1]].bc == 1) p[1] = globalData.q * globalData.s;
+            //konwekcja, dodajmey raz !
+            if (nodes[id[0]].bc == 1 && i == 1) {
+                h[0][0] += 2 * globalData.alfaAir * globalData.rMax;
+                p[0] += 2 * globalData.alfaAir * globalData.rMax * globalData.tempAir;
+            }
 
-        if (nodes[id[0]].bc == 2) p[0] = -1 * globalData.alfa * globalData.tot * globalData.s;
+            if (nodes[id[1]].bc == 1 && i == 1) {
+                h[1][1] += 2 * globalData.alfaAir * globalData.rMax;
+                p[1] += -(2 * globalData.alfaAir * globalData.rMax * globalData.tempAir);
+            }
 
-        if (nodes[id[1]].bc == 2) p[1] = -1 * globalData.alfa * globalData.tot * globalData.s;
+            cout << "H" << id[0] << "," << i << ":" << endl;
+            cout << h[0][0] << " " << h[0][1] << endl;
+            cout << h[1][0] << " " << h[1][1] << endl;
+            cout << endl;
+
+            cout << "P" << id[0] << "," << i << ":" << endl;
+            cout << p[0] << " " << p[1] << endl;
+            cout << endl;
+        }
     }
 };
 
@@ -124,33 +159,33 @@ struct siatkaMES
 
     siatkaMES(GlobalData globalData, int side) {
 
-        //Tworzenie nodÃ³w
+        //Tworzenie nodów
         int bc;
-
         for (int i = 0; i < globalData.nN; i++) {
-            if ((i == 0 && side == 1) || (i == globalData.nN - 1 && side == 2)) bc = 1;
-            else if ((i == 0 && side == 2) || (i == globalData.nN - 1 && side == 1)) bc = 2;
+            if (i == globalData.nN - 1) bc = 1;
             else bc = 0;
-
-            nodeVector.push_back(Node(0, i * (globalData.l / (globalData.nN - 1)), bc));
+            nodeVector.push_back(Node(globalData.tempBegin, globalData.dR * i, bc));
         }
 
-        //Tworzenie elementÃ³w siatki
-        for (int i = 0; i < globalData.nN - 1; i++)
+        //Tworzenie elementów siatki
+        for (int i = 0; i < globalData.nE; i++)
         {
             int id[2] = { i, i + 1 };
             double le = nodeVector[i + 1].x - nodeVector[i].x;
 
-            elementVector.push_back(Element(globalData.k, id, le));
+            elementVector.push_back(Element(globalData.k, id, globalData.dR));
         }
     }
 
     void calculate(GlobalData globalData)
     {
-        for (int i = 0; i < elementVector.size(); i++)
-        {
-            elementVector[i].calculate(globalData, nodeVector);
-        }
+        //for (int j = 0; j < time; j++)
+        //{
+            for (int i = 0; i < elementVector.size(); i++)
+            {
+                elementVector[i].calculate(globalData, nodeVector);
+            }
+        //}
     }
 };
 
@@ -160,7 +195,7 @@ struct SOE //System of Equations - uklad rownan
     vector<double> pg; //nN x 1
     vector<double> t; //nN x 1
 
-    void calculate(siatkaMES siatka) 
+    void calculate(siatkaMES siatka)
     {
         int siatkaMeshSize = siatka.nodeVector.size();
         hg = vector<vector<double>>(siatkaMeshSize, vector<double>(siatkaMeshSize));
@@ -185,7 +220,7 @@ struct SOE //System of Equations - uklad rownan
 };
 
 int main() {
-    GlobalData globalData = GlobalData(400, 10, -150, 50, 5, 2, 3, 2);
+    GlobalData globalData = GlobalData(0, 0.08, 300, 100, 1200, 1000, 700, 25, 7800, 9, 8);
 
     siatkaMES siatka = siatkaMES(globalData, 1);
     SOE soe = SOE();
@@ -194,4 +229,4 @@ int main() {
     soe.calculate(siatka);
 
     return 0;
-}
+};
